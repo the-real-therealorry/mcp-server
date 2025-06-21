@@ -78,6 +78,8 @@ jobs:
         host: ${{ secrets.VPS_HOST }}
         username: ${{ secrets.VPS_USER }}
         key: ${{ secrets.VPS_SSH_KEY }}
+        timeout: 30s
+        command_timeout: 300s
         script: |
           # Create backup of current deployment
           if [ -d "/opt/mcp-server" ]; then
@@ -103,6 +105,7 @@ jobs:
         host: ${{ secrets.VPS_HOST }}
         username: ${{ secrets.VPS_USER }}
         key: ${{ secrets.VPS_SSH_KEY }}
+        timeout: 30s
         source: "deploy.tar.gz"
         target: "/tmp/"
     
@@ -112,6 +115,8 @@ jobs:
         host: ${{ secrets.VPS_HOST }}
         username: ${{ secrets.VPS_USER }}
         key: ${{ secrets.VPS_SSH_KEY }}
+        timeout: 30s
+        command_timeout: 300s
         script: |
           # Extract deployment
           cd /opt/mcp-server
@@ -166,6 +171,8 @@ jobs:
         host: ${{ secrets.VPS_HOST }}
         username: ${{ secrets.VPS_USER }}
         key: ${{ secrets.VPS_SSH_KEY }}
+        timeout: 30s
+        command_timeout: 60s
         script: |
           # Wait for application to be fully ready
           sleep 10
@@ -189,10 +196,13 @@ jobs:
     - name: Notify deployment status
       if: always()
       uses: appleboy/ssh-action@v1.0.3
+      continue-on-error: true
       with:
         host: ${{ secrets.VPS_HOST }}
         username: ${{ secrets.VPS_USER }}
         key: ${{ secrets.VPS_SSH_KEY }}
+        timeout: 30s
+        command_timeout: 60s
         script: |
           echo "=== Deployment Summary ==="
           echo "Timestamp: $(date)"
@@ -202,13 +212,13 @@ jobs:
           
           echo "=== System Status ==="
           echo "Disk Usage:"
-          df -h /opt/mcp-server
+          df -h /opt/mcp-server 2>/dev/null || echo "Could not check disk usage"
           
           echo "Memory Usage:"
-          free -h
+          free -h 2>/dev/null || echo "Could not check memory usage"
           
           echo "PM2 Status:"
-          sudo -u mcp pm2 status
+          sudo -u mcp pm2 status 2>/dev/null || echo "Could not check PM2 status"
           
           echo "=== Application Status ==="
           if curl -f http://localhost:3001/health > /dev/null 2>&1; then
@@ -216,3 +226,14 @@ jobs:
           else
             echo "❌ Application: UNHEALTHY"
           fi
+    
+    - name: Deployment Summary
+      if: always()
+      run: |
+        echo "🚀 Deployment completed!"
+        echo "Commit: ${{ github.sha }}"
+        echo "Branch: ${{ github.ref_name }}"
+        echo "Deployed by: ${{ github.actor }}"
+        echo "Timestamp: $(date)"
+        echo ""
+        echo "Your application should be available at: https://mcp.titespec.com"
