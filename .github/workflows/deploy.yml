@@ -1,0 +1,215 @@
+name: Deploy to Vultr VPS
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm run setup
+    
+    - name: Run tests
+      run: npm test
+    
+    - name: Type check
+      run: |
+        cd backend && npm run type-check
+        cd ../dashboard && npm run type-check
+    
+    - name: Build application
+      run: npm run build
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+    
+    - name: Install dependencies and build
+      run: |
+        npm run setup
+        npm run build
+    
+    - name: Create deployment package
+      run: |
+        mkdir -p deploy
+        cp -r backend/dist deploy/
+        cp -r dashboard/dist deploy/dashboard
+        cp package*.json deploy/
+        cp -r backend/package*.json deploy/backend/
+        
+        # Create production node_modules
+        cd deploy
+        npm ci --only=production
+        cd backend
+        npm ci --only=production
+        cd ../..
+        
+        # Create deployment archive
+        tar -czf deploy.tar.gz -C deploy .
+    
+    - name: Deploy to VPS
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.VPS_HOST }}
+        username: ${{ secrets.VPS_USER }}
+        key: ${{ secrets.VPS_SSH_KEY }}
+        script: |
+          # Create backup of current deployment
+          if [ -d "/opt/mcp-server" ]; then
+            sudo rm -rf /opt/mcp-server-backup
+            sudo cp -r /opt/mcp-server /opt/mcp-server-backup
+          fi
+          
+          # Stop application
+          pm2 stop mcp-server || true
+          
+          # Create directory if it doesn't exist
+          sudo mkdir -p /opt/mcp-server
+          sudo chown mcp:mcp /opt/mcp-server
+          
+          # Clear old files but preserve data and logs
+          cd /opt/mcp-server
+          sudo -u mcp find . -maxdepth 1 -type f -not -name '.env' -not -name '*.log' -delete
+          sudo -u mcp rm -rf dist dashboard node_modules backend/dist backend/node_modules
+    
+    - name: Copy deployment files
+      uses: appleboy/scp-action@v0.1.7
+      with:
+        host: ${{ secrets.VPS_HOST }}
+        username: ${{ secrets.VPS_USER }}
+        key: ${{ secrets.VPS_SSH_KEY }}
+        source: "deploy.tar.gz"
+        target: "/tmp/"
+    
+    - name: Extract and start application
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.VPS_HOST }}
+        username: ${{ secrets.VPS_USER }}
+        key: ${{ secrets.VPS_SSH_KEY }}
+        script: |
+          # Extract deployment
+          cd /opt/mcp-server
+          sudo -u mcp tar -xzf /tmp/deploy.tar.gz
+          rm /tmp/deploy.tar.gz
+          
+          # Ensure data directories exist
+          sudo -u mcp mkdir -p data/zips data/extracted data/snapshots logs
+          
+          # Set permissions
+          sudo chown -R mcp:mcp /opt/mcp-server
+          sudo chmod -R 755 /opt/mcp-server
+          
+          # Start application
+          sudo -u mcp pm2 start npm --name "mcp-server" -- start
+          
+          # Save PM2 configuration
+          sudo -u mcp pm2 save
+          
+          # Wait for app to start
+          sleep 5
+          
+          # Check if app is running
+          if sudo -u mcp pm2 show mcp-server | grep -q "online"; then
+            echo "✅ Deployment successful - Application is running"
+            
+            # Clean up backup
+            sudo rm -rf /opt/mcp-server-backup
+          else
+            echo "❌ Deployment failed - Application not running"
+            echo "Rolling back to previous version..."
+            
+            # Stop failed deployment
+            pm2 stop mcp-server || true
+            pm2 delete mcp-server || true
+            
+            # Restore backup if it exists
+            if [ -d "/opt/mcp-server-backup" ]; then
+              sudo rm -rf /opt/mcp-server
+              sudo mv /opt/mcp-server-backup /opt/mcp-server
+              sudo -u mcp pm2 start npm --name "mcp-server" -- start
+              sudo -u mcp pm2 save
+              echo "🔄 Rollback completed"
+            fi
+            
+            exit 1
+          fi
+    
+    - name: Health Check
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.VPS_HOST }}
+        username: ${{ secrets.VPS_USER }}
+        key: ${{ secrets.VPS_SSH_KEY }}
+        script: |
+          # Wait for application to be fully ready
+          sleep 10
+          
+          # Check if the application responds to health check
+          if curl -f http://localhost:3001/health > /dev/null 2>&1; then
+            echo "✅ Health check passed - Application is responding"
+          else
+            echo "❌ Health check failed - Application not responding"
+            
+            # Show PM2 logs for debugging
+            echo "PM2 Status:"
+            sudo -u mcp pm2 status
+            
+            echo "Application Logs:"
+            sudo -u mcp pm2 logs mcp-server --lines 20
+            
+            exit 1
+          fi
+    
+    - name: Notify deployment status
+      if: always()
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.VPS_HOST }}
+        username: ${{ secrets.VPS_USER }}
+        key: ${{ secrets.VPS_SSH_KEY }}
+        script: |
+          echo "=== Deployment Summary ==="
+          echo "Timestamp: $(date)"
+          echo "Git Commit: ${{ github.sha }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Deployed by: ${{ github.actor }}"
+          
+          echo "=== System Status ==="
+          echo "Disk Usage:"
+          df -h /opt/mcp-server
+          
+          echo "Memory Usage:"
+          free -h
+          
+          echo "PM2 Status:"
+          sudo -u mcp pm2 status
+          
+          echo "=== Application Status ==="
+          if curl -f http://localhost:3001/health > /dev/null 2>&1; then
+            echo "✅ Application: HEALTHY"
+          else
+            echo "❌ Application: UNHEALTHY"
+          fi
