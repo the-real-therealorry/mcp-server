@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: mcp-server
+    env: node
+    buildCommand: |
+      npm ci &&
+      npm run build
+    startCommand: npm run start
+    plan: starter
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "10000"
+      - key: MAX_FILE_SIZE
+        value: "52428800"
+      - key: CORS_ORIGIN
+        value: "*"
+      - key: LOG_LEVEL
+        value: "info"
+      - key: RATE_LIMIT_ENABLED
+        value: "true"
+    autoDeploy: true
+    healthCheckPath: "/api/health"
+    disk:
+      name: mcp-data
+      mountPath: /app/data
+      sizeGB: 1
