@@ -52,10 +52,15 @@ jobs:
     - name: Create deployment package
       run: |
         mkdir -p deploy
+        mkdir -p deploy/backend
+        
+        # Copy built files
         cp -r backend/dist deploy/
         cp -r dashboard/dist deploy/dashboard
+        
+        # Copy package files
         cp package*.json deploy/
-        cp -r backend/package*.json deploy/backend/
+        cp backend/package*.json deploy/backend/
         
         # Create production node_modules
         cd deploy
